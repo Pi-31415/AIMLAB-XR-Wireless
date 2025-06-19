@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>AIMLAB Wireless XR - AR Hand Tracking Experience</title>
+    <meta name="description" content="AIMLAB Wireless XR - Interactive AR Experience with Hand Tracking">
+    <meta name="author" content="Pi Ko (pi.ko@nyu.edu)">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    
+    <!-- A-Frame for hand tracking and AR -->
+    <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+    <script src="https://unpkg.com/aframe-environment-component@1.3.x/dist/aframe-environment-component.min.js"></script>
+    
+    <!-- Custom Components -->
+    <script>
+        /**
+         * AIMLAB XR Wireless - AR Session Manager
+         * 
+         * This component handles AR session initialization and passthrough configuration.
+         * It manages the transition between AR and VR modes, adjusting visual elements
+         * appropriately for each mode to provide an optimal user experience.
+         * 
+         * Features:
+         * - Automatic skybox hiding in AR mode for passthrough effect
+         * - Dynamic lighting adjustment based on AR/VR mode
+         * - Session state management and event handling
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        AFRAME.registerComponent('ar-session-manager', {
+            init: function() {
+                const scene = this.el.sceneEl;
+                
+                // Configure AR mode for passthrough
+                scene.addEventListener('enter-vr', () => {
+                    if (scene.is('ar-mode')) {
+                        console.log('Entering AR mode with passthrough');
+                        // Hide skybox in AR mode for passthrough effect
+                        const sky = document.querySelector('#sky');
+                        if (sky) sky.setAttribute('visible', false);
+                        
+                        // Adjust lighting for AR
+                        const light = document.querySelector('#ambient-light');
+                        if (light) light.setAttribute('light', 'intensity', 1.2);
+                    }
+                });
+                
+                scene.addEventListener('exit-vr', () => {
+                    console.log('Exiting AR mode');
+                    // Restore skybox when exiting AR
+                    const sky = document.querySelector('#sky');
+                    if (sky) sky.setAttribute('visible', true);
+                });
+            }
+        });
+        
+        /**
+         * Interactive Button Component
+         * 
+         * Creates pressable 3D buttons with hand tracking support and visual feedback.
+         * This component provides a comprehensive button system that works with both
+         * hand tracking gestures and traditional mouse/touch inputs.
+         * 
+         * Features:
+         * - Customizable appearance (size, color, label)
+         * - Hover effects with scaling and color changes
+         * - Action-based event system
+         * - Hand tracking compatibility
+         * - Visual feedback animations
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        AFRAME.registerComponent('interactive-button', {
+            schema: {
+                label: {type: 'string', default: 'Button'},
+                width: {type: 'number', default: 0.15},
+                height: {type: 'number', default: 0.05},
+                color: {type: 'color', default: '#3a50d9'},
+                hoverColor: {type: 'color', default: '#5470f9'},
+                action: {type: 'string', default: ''}
+            },
+            
+            init: function() {
+                const data = this.data;
+                
+                // Create button geometry
+                this.el.setAttribute('geometry', {
+                    primitive: 'box',
+                    width: data.width,
+                    height: data.height,
+                    depth: 0.02
+                });
+                
+                this.el.setAttribute('material', {
+                    color: data.color
+                });
+                
+                // Create text label
+                const textEl = document.createElement('a-text');
+                textEl.setAttribute('value', data.label);
+                textEl.setAttribute('position', `0 0 0.011`);
+                textEl.setAttribute('align', 'center');
+                textEl.setAttribute('width', 1.5);
+                textEl.setAttribute('color', '#ffffff');
+                this.el.appendChild(textEl);
+                
+                // Add interactivity
+                this.setupInteraction();
+            },
+            
+            setupInteraction: function() {
+                const data = this.data;
+                
+                // Hover effects
+                this.el.addEventListener('mouseenter', () => {
+                    this.el.setAttribute('material', 'color', data.hoverColor);
+                    this.el.setAttribute('scale', '1.1 1.1 1.1');
+                });
+                
+                this.el.addEventListener('mouseleave', () => {
+                    this.el.setAttribute('material', 'color', data.color);
+                    this.el.setAttribute('scale', '1 1 1');
+                });
+                
+                // Click handler
+                this.el.addEventListener('click', () => {
+                    this.handleAction(data.action);
+                });
+            },
+            
+            /**
+             * Handle button action based on the specified action type
+             * @param {string} action - The action to perform
+             */
+            handleAction: function(action) {
+                console.log(`Button action: ${action}`);
+                
+                switch(action) {
+                    case 'togglePlanets':
+                        const planets = document.querySelector('#planet-system');
+                        const isVisible = planets.getAttribute('visible');
+                        planets.setAttribute('visible', !isVisible);
+                        break;
+                    case 'changeShape':
+                        const shape = document.querySelector('#interactive-shape');
+                        const shapes = ['box', 'sphere', 'torus'];
+                        const current = shape.getAttribute('geometry').primitive;
+                        const nextIndex = (shapes.indexOf(current) + 1) % shapes.length;
+                        shape.setAttribute('geometry', 'primitive', shapes[nextIndex]);
+                        break;
+                    case 'toggleDarkMode':
+                        const scene = document.querySelector('a-scene');
+                        scene.classList.toggle('dark-mode');
+                        break;
+                }
+            }
+        });
+        
+        /**
+         * Pinchable Component
+         * 
+         * Allows objects to be grabbed and moved with hand pinch gestures.
+         * This component integrates with the WebXR hand tracking API to provide
+         * natural hand interaction with 3D objects in AR/VR space.
+         * 
+         * Features:
+         * - Pinch gesture detection
+         * - Visual feedback during interaction
+         * - Opacity changes to indicate grab state
+         * - Event emission for custom behavior
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        AFRAME.registerComponent('pinchable', {
+            init: function() {
+                this.el.classList.add('pinchable');
+                
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    this.el.setAttribute('material', 'opacity', 0.7);
+                    console.log('Object pinched');
+                });
+                
+                this.el.addEventListener('pinchended', (evt) => {
+                    this.el.setAttribute('material', 'opacity', 1);
+                    console.log('Object released');
+                });
+            }
+        });
+        
+        /**
+         * Title Component
+         * 
+         * Creates an animated 3D title display for AIMLAB XR with visual effects.
+         * This component generates the main branding element with rotating animation
+         * and glowing effects to create an engaging visual centerpiece.
+         * 
+         * Features:
+         * - Animated rotation
+         * - Emissive glow effects
+         * - Subtitle display
+         * - Customizable positioning and styling
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        AFRAME.registerComponent('aimlab-title', {
+            init: function() {
+                // Create main title
+                const titleText = document.createElement('a-text');
+                titleText.setAttribute('value', 'AIMLAB Wireless XR');
+                titleText.setAttribute('position', '0 3 -5');
+                titleText.setAttribute('align', 'center');
+                titleText.setAttribute('width', 8);
+                titleText.setAttribute('color', '#00ff88');
+                titleText.setAttribute('font', 'kelsonsans');
+                titleText.setAttribute('animation', {
+                    property: 'rotation',
+                    to: '0 360 0',
+                    dur: 20000,
+                    loop: true,
+                    easing: 'linear'
+                });
+                
+                // Add glow effect
+                titleText.setAttribute('material', {
+                    shader: 'standard',
+                    emissive: '#00ff88',
+                    emissiveIntensity: 0.5
+                });
+                
+                this.el.appendChild(titleText);
+                
+                // Create subtitle
+                const subtitle = document.createElement('a-text');
+                subtitle.setAttribute('value', 'Interactive AR Experience');
+                subtitle.setAttribute('position', '0 2.5 -5');
+                subtitle.setAttribute('align', 'center');
+                subtitle.setAttribute('width', 4);
+                subtitle.setAttribute('color', '#ffffff');
+                subtitle.setAttribute('opacity', 0.8);
+                
+                this.el.appendChild(subtitle);
+            }
+        });
+        
+        /**
+         * Planet System Component
+         * 
+         * Creates an animated solar system with multiple planets orbiting around a central sun.
+         * This component demonstrates complex 3D animation and provides interactive elements
+         * that users can grab and manipulate with hand tracking.
+         * 
+         * Features:
+         * - Multiple planet configurations
+         * - Orbital animations with different speeds
+         * - Emissive sun with glow effect
+         * - Interactive planet grabbing
+         * - Realistic color schemes for celestial bodies
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        AFRAME.registerComponent('planet-system', {
+            init: function() {
+                const planets = [
+                    {name: 'sun', radius: 0.3, color: '#FDB813', position: '0 0 0', emissive: '#FDB813'},
+                    {name: 'mercury', radius: 0.05, color: '#8C8C8C', orbitRadius: 1, speed: 4},
+                    {name: 'venus', radius: 0.12, color: '#FFC649', orbitRadius: 1.5, speed: 3},
+                    {name: 'earth', radius: 0.13, color: '#4A90E2', orbitRadius: 2, speed: 2},
+                    {name: 'mars', radius: 0.07, color: '#CD5120', orbitRadius: 2.5, speed: 1.5}
+                ];
+                
+                planets.forEach((planet, index) => {
+                    const planetEl = document.createElement('a-sphere');
+                    planetEl.setAttribute('radius', planet.radius);
+                    planetEl.setAttribute('color', planet.color);
+                    
+                    if (planet.emissive) {
+                        planetEl.setAttribute('material', {
+                            emissive: planet.emissive,
+                            emissiveIntensity: 0.8
+                        });
+                    }
+                    
+                    if (planet.orbitRadius) {
+                        // Create orbit container for animated rotation
+                        const orbit = document.createElement('a-entity');
+                        orbit.setAttribute('animation', {
+                            property: 'rotation',
+                            to: '0 360 0',
+                            dur: 10000 / planet.speed,
+                            loop: true,
+                            easing: 'linear'
+                        });
+                        
+                        planetEl.setAttribute('position', `${planet.orbitRadius} 0 0`);
+                        orbit.appendChild(planetEl);
+                        this.el.appendChild(orbit);
+                    } else {
+                        planetEl.setAttribute('position', planet.position);
+                        this.el.appendChild(planetEl);
+                    }
+                    
+                    // Make planets pinchable for hand interaction
+                    planetEl.setAttribute('pinchable', '');
+                    planetEl.classList.add('clickable');
+                });
+            }
+        });
+    </script>
+    
+    <style>
+        /**
+         * AIMLAB XR Wireless - Main Stylesheet
+         * 
+         * This stylesheet provides the visual styling for the AIMLAB XR interface,
+         * including responsive design elements, overlay panels, and interactive buttons.
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        body {
+            margin: 0;
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+        }
+        
+        /* Information overlay panel */
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            z-index: 999;
+            font-size: 14px;
+            backdrop-filter: blur(10px);
+        }
+        
+        /* Dark mode styling */
+        .dark-mode {
+            background: #000;
+        }
+        
+        /* AR mode entry button */
+        #ar-button {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 24px;
+            background: #00ff88;
+            color: #000;
+            border: none;
+            border-radius: 25px;
+            font-weight: bold;
+            cursor: pointer;
+            z-index: 999;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 255, 136, 0.3);
+        }
+        
+        #ar-button:hover {
+            background: #00cc70;
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(0, 255, 136, 0.4);
+        }
+        
+        /* Responsive design for mobile devices */
+        @media (max-width: 768px) {
+            #info {
+                font-size: 12px;
+                padding: 8px 16px;
+            }
+            
+            #ar-button {
+                padding: 10px 20px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Information overlay panel -->
+    <div id="info">
+        <h3>AIMLAB Wireless XR</h3>
+        <p>Use hand tracking to interact with objects</p>
+        <p>Pinch to grab and move items</p>
+        <p>Point at buttons to interact</p>
+    </div>
+    
+    <!-- 
+        Main A-Frame Scene
+        
+        This scene configuration enables comprehensive WebXR features including:
+        - Hand tracking for natural gesture interactions
+        - AR mode with passthrough for see-through experience
+        - DOM overlay support for UI elements
+        - Hit testing for surface placement (future feature)
+        - Anchor support for persistent AR objects
+        
+        @author Pi Ko (pi.ko@nyu.edu)
+    -->
+    <a-scene
+        ar-session-manager
+        webxr="optionalFeatures: hand-tracking, dom-overlay, hit-test, anchors; overlayElement: #info"
+        environment="preset: none; lighting: none"
+        cursor="rayOrigin: mouse"
+        renderer="colorManagement: true; physicallyCorrectLights: true">
+        
+        <!-- Asset Management System -->
+        <a-assets>
+            <img id="grid" src="https://cdn.aframe.io/a-painter/images/floor.jpg" crossorigin="anonymous">
+        </a-assets>
+        
+        <!-- Lighting Configuration -->
+        <a-light id="ambient-light" type="ambient" color="#ffffff" intensity="0.6"></a-light>
+        <a-light type="directional" position="1 2 1" color="#ffffff" intensity="0.8"></a-light>
+        
+        <!-- Sky (hidden in AR mode for passthrough effect) -->
+        <a-sky id="sky" color="#001122"></a-sky>
+        
+        <!-- AIMLAB Title Display -->
+        <a-entity aimlab-title></a-entity>
+        
+        <!-- Interactive Shape - Main demo object -->
+        <a-entity
+            id="interactive-shape"
+            position="0 1.5 -2"
+            geometry="primitive: box; width: 0.5; height: 0.5; depth: 0.5"
+            material="color: #ff4b5c; metalness: 0.3; roughness: 0.7"
+            pinchable
+            animation="property: rotation; to: 0 360 0; dur: 8000; loop: true; easing: linear"
+            class="clickable">
+        </a-entity>
+        
+        <!-- Control Panel - Interactive UI -->
+        <a-entity id="control-panel" position="0 1 -1.5">
+            <!-- Panel background -->
+            <a-plane 
+                position="0 0 -0.01" 
+                width="0.8" 
+                height="0.4" 
+                color="#222"
+                opacity="0.9">
+            </a-plane>
+            
+            <!-- Toggle Planets Button -->
+            <a-entity 
+                interactive-button="label: Toggle Planets; action: togglePlanets; width: 0.25"
+                position="-0.25 0.1 0"
+                class="clickable">
+            </a-entity>
+            
+            <!-- Change Shape Button -->
+            <a-entity 
+                interactive-button="label: Change Shape; action: changeShape; width: 0.25"
+                position="0 0.1 0"
+                class="clickable">
+            </a-entity>
+            
+            <!-- Dark Mode Toggle Button -->
+            <a-entity 
+                interactive-button="label: Dark Mode; action: toggleDarkMode; width: 0.25"
+                position="0.25 0.1 0"
+                class="clickable">
+            </a-entity>
+            
+            <!-- Control Panel Label -->
+            <a-text 
+                value="Control Panel" 
+                position="0 -0.12 0" 
+                align="center" 
+                width="2" 
+                color="#00ff88">
+            </a-text>
+        </a-entity>
+        
+        <!-- Animated Planet System -->
+        <a-entity 
+            id="planet-system" 
+            planet-system 
+            position="2 2 -3"
+            scale="0.5 0.5 0.5">
+        </a-entity>
+        
+        <!-- Hand Tracking Controllers -->
+        <a-entity 
+            hand-tracking-controls="hand: left"
+            hand-tracking-grab-controls="hand: left">
+        </a-entity>
+        
+        <a-entity 
+            hand-tracking-controls="hand: right"
+            hand-tracking-grab-controls="hand: right">
+        </a-entity>
+        
+        <!-- Ground plane for AR surface indication -->
+        <a-plane 
+            id="ground"
+            position="0 0 0" 
+            rotation="-90 0 0" 
+            width="50" 
+            height="50" 
+            color="#2a2a2a"
+            material="src: #grid; repeat: 50 50"
+            visible="false">
+        </a-plane>
+        
+        <!-- Camera with cursor for interaction -->
+        <a-entity camera position="0 1.6 0">
+            <a-cursor 
+                animation__click="property: scale; startEvents: click; from: 0.1 0.1 0.1; to: 1 1 1; dur: 150"
+                animation__fusing="property: scale; startEvents: fusing; from: 1 1 1; to: 0.1 0.1 0.1; dur: 1500"
+                raycaster="objects: .clickable"
+                geometry="primitive: ring; radiusInner: 0.02; radiusOuter: 0.03">
+            </a-cursor>
+        </a-entity>
+    </a-scene>
+    
+    <!-- AR Mode Entry Button -->
+    <button id="ar-button" onclick="document.querySelector('a-scene').enterAR()">
+        Enter AR Mode
+    </button>
+    
+    <script>
+        /**
+         * WebXR Support Detection and Button Management
+         * 
+         * This script checks for WebXR support and manages the visibility
+         * of AR mode entry buttons based on device capabilities.
+         * 
+         * @author Pi Ko (pi.ko@nyu.edu)
+         */
+        
+        // Initialize AR button visibility based on device capabilities
+        if ('xr' in navigator) {
+            navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+                if (!supported) {
+                    document.getElementById('ar-button').style.display = 'none';
+                    console.log('AR not supported on this device');
+                } else {
+                    console.log('AR supported - button enabled');
+                }
+            }).catch((err) => {
+                console.warn('Error checking AR support:', err);
+                document.getElementById('ar-button').style.display = 'none';
+            });
+        } else {
+            document.getElementById('ar-button').style.display = 'none';
+            console.log('WebXR not available');
+        }
+        
+        // Debug mode enabler
+        if (new URLSearchParams(window.location.search).get('debug') === 'true') {
+            window.AFRAME.logLevel = 'debug';
+            console.log('Debug mode enabled');
+        }
+    </script>
+</body>
+</html> 
