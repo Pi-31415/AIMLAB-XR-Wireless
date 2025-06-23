@@ -1,0 +1,606 @@
+<!doctype html>
+<!--
+Author: Pi Ko (pi.ko@nyu.edu)
+Date: 23 June 2025
+Version: v1.0
+Description: Hand tracking in immersive AR session with passthrough display.
+             Combines hand tracking functionality with AR session for real-world interaction.
+
+Changelog:
+v1.0 - 23 June 2025 - Initial creation by Pi Ko
+       - Combined hand tracking from immersive-hands.html with AR session from immersive-ar-session.html
+       - Enabled hand tracking in immersive AR mode with passthrough display
+       - Added interactive elements visible in AR space
+       - Scaled scene elements appropriately for AR viewing
+
+Copyright 2020 The Immersive Web Community Group
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+-->
+<html>
+
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+  <meta name='mobile-web-app-capable' content='yes'>
+  <meta name='apple-mobile-web-app-capable' content='yes'>
+  <link rel='icon' type='image/png' sizes='32x32' href='./favicon-32x32.png'>
+  <link rel='icon' type='image/png' sizes='96x96' href='./favicon-96x96.png'>
+  <link rel='stylesheet' href='./css/common.css'>
+
+  <title>Hand-Tracked AR Passthrough</title>
+</head>
+
+<body>
+  <header>
+    <details open>
+      <summary>Hand-Tracked AR Passthrough</summary>
+      <p>
+        This sample demonstrates hand tracking within an immersive AR session with passthrough display.
+        Your hands will be visible as cubes overlaid on the real world, allowing for natural interaction
+        with virtual objects in your physical space. Each cube represents a joint in your hand.
+        <a class="back" href="./">Back</a>
+      </p>
+    </details>
+  </header>
+  <main style='text-align: center;'>
+    <p>Click 'Enter AR' to see content</p>
+  </main>
+  <script type="module">
+    import { WebXRButton } from './js/util/webxr-button.js';
+    import { Scene } from './js/render/scenes/scene.js';
+    import { Node } from './js/render/core/node.js';
+    import { Renderer, createWebGLContext } from './js/render/core/renderer.js';
+    import { Gltf2Node } from './js/render/nodes/gltf2.js';
+    import { SkyboxNode } from './js/render/nodes/skybox.js';
+    import { BoxBuilder } from './js/render/geometry/box-builder.js';
+    import { PbrMaterial } from './js/render/materials/pbr.js';
+    import { QueryArgs } from './js/util/query-args.js';
+    import { InlineViewerHelper } from './js/util/inline-viewer-helper.js';
+    import {mat4} from './js/render/math/gl-matrix.js';
+    import {vec3} from './js/render/math/gl-matrix.js';
+    import {Ray} from './js/render/math/ray.js';
+
+    // This library matches XRInputSource profiles to available controller models for us.
+    import { fetchProfile } from 'https://cdn.jsdelivr.net/npm/@webxr-input-profiles/motion-controllers@1.0/dist/motion-controllers.module.js';
+
+    // The path of the CDN the sample will fetch controller models from.
+    const DEFAULT_PROFILES_PATH = 'https://cdn.jsdelivr.net/npm/@webxr-input-profiles/assets@1.0/dist/profiles';
+
+    // If requested, use the polyfill to provide support for mobile devices
+    // and devices which only support WebVR.
+    import WebXRPolyfill from './js/third-party/webxr-polyfill/build/webxr-polyfill.module.js';
+    if (QueryArgs.getBool('usePolyfill', true)) {
+      let polyfill = new WebXRPolyfill();
+    }
+
+    // XR globals.
+    let xrButton = null;
+    let xrImmersiveRefSpace = null;
+    let inlineViewerHelper = null;
+    let radii = new Float32Array(25);
+    let positions = new Float32Array(16*25);
+    
+    // Hand tracking boxes
+    let boxes_left = [];
+    let boxes_right = [];
+    let boxes_none = [];
+    let tracked_boxes_left = [];
+    let tracked_boxes_right = [];
+    let tracked_boxes_none = [];
+    let boxes = { input_left: boxes_left, input_right: boxes_right, input_none: boxes_none, tracked_left: tracked_boxes_left, tracked_right: tracked_boxes_right, tracked_none: tracked_boxes_none };
+    let indexFingerBoxes = { input_left: null, input_right: null, tracked_left: null, tracked_right: null };
+    const defaultBoxColor = {r: 0.5, g: 0.5, b: 0.5};
+    const leftBoxColor = {r: 1, g: 0, b: 1};
+    const rightBoxColor = {r: 0, g: 1, b: 1};
+    let interactionBox = null;
+    let leftInteractionBox = null;
+    let rightInteractionBox = null;
+
+    // WebGL scene globals.
+    let gl = null;
+    let renderer = null;
+    let scene = new Scene();
+    
+    // Add a scaled-down space scene for AR viewing
+    let solarSystem = new Gltf2Node({url: './media/gltf/space/space.gltf'});
+    // Scale down significantly for AR viewing in real-world space
+    solarSystem.scale = [0.05, 0.05, 0.05];
+    solarSystem.translation = [0, 0, -1]; // Position it in front of user
+    scene.addNode(solarSystem);
+    
+    // Add skybox for inline view only
+    let skybox = new SkyboxNode({url: './media/textures/milky-way-4k.png'});
+    scene.addNode(skybox);
+
+    /**
+     * Creates a box primitive with specified RGB color values
+     * @param {number} r - Red component (0-1)
+     * @param {number} g - Green component (0-1) 
+     * @param {number} b - Blue component (0-1)
+     * @returns {Object} Render primitive for the box
+     */
+    function createBoxPrimitive(r, g, b) {	
+      let boxBuilder = new BoxBuilder();	
+      boxBuilder.pushCube([0, 0, 0], 1);	
+      let boxPrimitive = boxBuilder.finishPrimitive(renderer);	
+      let boxMaterial = new PbrMaterial();	
+      boxMaterial.baseColorFactor.value = [r, g, b, 1];	
+      return renderer.createRenderPrimitive(boxPrimitive, boxMaterial);	
+    }
+
+    /**
+     * Adds a box node to the scene with specified color
+     * @param {number} x - X position
+     * @param {number} y - Y position
+     * @param {number} z - Z position
+     * @param {number} r - Red component
+     * @param {number} g - Green component
+     * @param {number} b - Blue component
+     * @param {number} offset - Offset value (unused in current implementation)
+     * @returns {Node} The created box node
+     */
+    function addBox(x, y, z, r, g, b, offset) {
+      let boxRenderPrimitive = createBoxPrimitive(r, g, b);
+      let boxNode = new Node();
+      boxNode.addRenderPrimitive(boxRenderPrimitive);
+      // Marks the node as one that needs to be checked when hit testing.
+      boxNode.selectable = true;
+      return boxNode;
+    }
+
+    /**
+     * Initializes hand tracking by creating boxes for each hand joint
+     */
+    function initHands() {
+      // Clean up existing hand boxes
+      for (const box of boxes_left) {
+        scene.removeNode(box);
+      }
+      for (const box of boxes_right) {
+        scene.removeNode(box);
+      }
+      boxes_left = [];
+      boxes_right = [];
+      boxes = { input_left: boxes_left, input_right: boxes_right, input_none: boxes_none, tracked_left: tracked_boxes_left, tracked_right: tracked_boxes_right, tracked_none: tracked_boxes_none };
+      
+      // Create hand joint boxes if hand tracking is supported
+      if (typeof XRHand !== 'undefined') {
+        for (let i = 0; i <= 24; i++) {
+          const r = .6 + Math.random() * .4;
+          const g = .6 + Math.random() * .4;
+          const b = .6 + Math.random() * .4;
+          boxes_left.push(addBox(0, 0, 0, r, g, b));
+          boxes_right.push(addBox(0, 0, 0, r, g, b));
+          tracked_boxes_left.push(addBox(0, 0, 0, r, g, b));
+          tracked_boxes_right.push(addBox(0, 0, 0, r, g, b));
+        }
+      }
+      
+      // Clean up existing index finger boxes
+      if (indexFingerBoxes.input_left) {
+        scene.removeNode(indexFingerBoxes.left);
+      }
+      if (indexFingerBoxes.input_right) {
+        scene.removeNode(indexFingerBoxes.input_right);
+      }
+      if (indexFingerBoxes.tracked_left) {
+        scene.removeNode(indexFingerBoxes.tracked_left);
+      }
+      if (indexFingerBoxes.tracked_right) {
+        scene.removeNode(indexFingerBoxes.tracked_right);
+      }
+      
+      // Create special index finger tip boxes
+      indexFingerBoxes.input_left = addBox(0, 0, 0, leftBoxColor.r, leftBoxColor.g, leftBoxColor.b);
+      indexFingerBoxes.input_right = addBox(0, 0, 0, rightBoxColor.r, rightBoxColor.g, rightBoxColor.b);
+      indexFingerBoxes.tracked_left = addBox(0, 0, 0, leftBoxColor.r, leftBoxColor.g, leftBoxColor.b);
+      indexFingerBoxes.tracked_right = addBox(0, 0, 0, rightBoxColor.r, rightBoxColor.g, rightBoxColor.b);
+    }
+
+    /**
+     * Initialize XR system and create UI button
+     */
+    function initXR() {
+      xrButton = new WebXRButton({
+        onRequestSession: onRequestSession,
+        onEndSession: onEndSession,
+        textEnterXRTitle: "START AR",
+        textXRNotFoundTitle: "AR NOT FOUND",
+        textExitXRTitle: "EXIT AR",
+      });
+      document.querySelector('header').appendChild(xrButton.domElement);
+
+      if (navigator.xr) {
+        // Check for immersive-ar support
+        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+          xrButton.enabled = supported;
+        });
+
+        // Start inline session for preview
+        navigator.xr.requestSession('inline').then(onSessionStarted);
+      }
+    }
+
+    /**
+     * Request an immersive AR session with hand tracking
+     */
+    function onRequestSession() {
+      return navigator.xr.requestSession('immersive-ar', { 
+        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] 
+      }).then((session) => {
+        xrButton.setSession(session);
+        session.isImmersive = true;
+        onSessionStarted(session);
+      });
+    }
+
+    /**
+     * Initialize WebGL context
+     */
+    function initGL() {
+      if (gl)
+        return;
+
+      gl = createWebGLContext({
+        xrCompatible: true
+      });
+      document.body.appendChild(gl.canvas);
+
+      function onResize() {
+        gl.canvas.width = gl.canvas.clientWidth * window.devicePixelRatio;
+        gl.canvas.height = gl.canvas.clientHeight * window.devicePixelRatio;
+      }
+      window.addEventListener('resize', onResize);
+      onResize();
+
+      renderer = new Renderer(gl);
+      scene.setRenderer(renderer);
+    }
+
+    /**
+     * Called when XR session starts
+     * @param {XRSession} session - The XR session
+     */
+    function onSessionStarted(session) {
+      session.addEventListener('end', onSessionEnded);
+      session.addEventListener('inputsourceschange', onInputSourcesChange);
+      // trackedSources are still experimental. Don't rely on this feature yet.
+      session.addEventListener('trackedsourceschange', onInputSourcesChange);
+
+      session.addEventListener('visibilitychange', e => {
+        // Remove hand controllers while blurred
+        if(e.session.visibilityState === 'visible-blurred') {
+          for (const box of boxes['input_left']) {
+            scene.removeNode(box);
+          }
+          for (const box of boxes['input_right']) {
+            scene.removeNode(box);
+          }
+          for (const box of boxes['tracked_left']) {
+            scene.removeNode(box);
+          }
+          for (const box of boxes['tracked_right']) {
+            scene.removeNode(box);
+          }
+        }
+      });
+
+      if (session.isImmersive) {
+        // When in 'immersive-ar' mode don't draw an opaque background because
+        // we want the real world to show through.
+        skybox.visible = false;
+      }
+
+      initGL();
+      initHands();
+
+      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+      let refSpaceType = session.isImmersive ? 'local' : 'viewer';
+      session.requestReferenceSpace(refSpaceType).then((refSpace) => {
+        if (session.isImmersive) {
+          xrImmersiveRefSpace = refSpace;
+
+          xrImmersiveRefSpace.addEventListener('reset', (evt) => {
+            if (evt.transform) {
+              // AR experiences typically should stay grounded to the real world.
+              // If there's a known origin shift, compensate for it here.
+              xrImmersiveRefSpace = xrImmersiveRefSpace.getOffsetReferenceSpace(evt.transform);
+            }
+          });
+        } else {
+          inlineViewerHelper = new InlineViewerHelper(gl.canvas, refSpace);
+        }
+        session.requestAnimationFrame(onXRFrame);
+      });
+    }
+
+    /**
+     * End the XR session
+     * @param {XRSession} session - The XR session to end
+     */
+    function onEndSession(session) {
+      session.end();
+    }
+
+    /**
+     * Called when the session ends
+     * @param {Event} event - Session end event
+     */
+    function onSessionEnded(event) {
+      if (event.session.isImmersive) {
+        xrButton.setSession(null);
+        // Turn the background back on when we go back to the inline view.
+        skybox.visible = true;
+      }
+    }
+
+    /**
+     * Handle input source changes
+     * @param {Event} event - Input sources change event
+     */
+    function onInputSourcesChange(event) {
+      onSourcesChange(event, "input_");
+    }
+
+    /**
+     * Handle tracked source changes  
+     * @param {Event} event - Tracked sources change event
+     */
+    function onTrackedSourcesChange(event) {
+      onSourcesChange(event, "tracked_");
+    }
+
+    /**
+     * Handle changes in input or tracked sources
+     * @param {Event} event - Source change event
+     * @param {string} type - Type prefix ("input_" or "tracked_")
+     */
+    function onSourcesChange(event, type) {
+      // As input sources are connected if they are tracked-pointer devices
+      // look up which meshes should be associated with their profile and
+      // load as the controller model for that hand.
+      for (let inputSource of event.added) {
+        if (inputSource.targetRayMode == 'tracked-pointer') {
+          // Use the fetchProfile method from the motionControllers library
+          // to find the appropriate glTF mesh path for this controller.
+          fetchProfile(inputSource, DEFAULT_PROFILES_PATH).then(({profile, assetPath}) => {
+            // Typically if you wanted to animate the controllers in response
+            // to device inputs you'd create a new MotionController() instance
+            // here to handle the animation, but this sample will skip that
+            // and only display a static mesh for simplicity.
+            scene.inputRenderer.setControllerMesh(new Gltf2Node({url: assetPath}), inputSource.handedness, inputSource.profiles[0]);
+          });
+        }
+      }
+    }
+
+    /**
+     * Update input sources for hand tracking
+     * @param {XRSession} session - Current XR session
+     * @param {XRFrame} frame - Current XR frame
+     * @param {XRReferenceSpace} refSpace - Reference space
+     */
+    function updateInputSources(session, frame, refSpace) {
+      updateSources(session, frame, refSpace, session.inputSources, "input_");
+    }
+
+    /**
+     * Update tracked sources for hand tracking
+     * @param {XRSession} session - Current XR session
+     * @param {XRFrame} frame - Current XR frame  
+     * @param {XRReferenceSpace} refSpace - Reference space
+     */
+    function updateTrackedSources(session, frame, refSpace) {
+      // session.trackedSources are still experimental. Don't rely on this feature yet.
+      if (session.trackedSources) {
+        updateSources(session, frame, refSpace, session.trackedSources, "tracked_");
+      }
+    }
+
+    /**
+     * Update sources (input or tracked) for hand tracking visualization
+     * @param {XRSession} session - Current XR session
+     * @param {XRFrame} frame - Current XR frame
+     * @param {XRReferenceSpace} refSpace - Reference space
+     * @param {Array} sources - Array of input sources
+     * @param {string} type - Type prefix ("input_" or "tracked_")
+     */
+    function updateSources(session, frame, refSpace, sources, type) {
+      if(session.visibilityState === 'visible-blurred') {
+        return;
+      }
+      
+      for (let inputSource of sources) {
+        let hand_type = type + inputSource.handedness;
+        
+        if (type == "input_") {
+          let targetRayPose = frame.getPose(inputSource.targetRaySpace, refSpace);
+          if (targetRayPose) {
+            if (inputSource.targetRayMode == 'tracked-pointer') {
+              scene.inputRenderer.addLaserPointer(targetRayPose.transform);
+            }
+
+            let targetRay = new Ray(targetRayPose.transform);
+            let cursorDistance = 2.0;
+            let cursorPos = vec3.fromValues(
+                targetRay.origin.x,
+                targetRay.origin.y,
+                targetRay.origin.z
+                );
+            vec3.add(cursorPos, cursorPos, [
+                targetRay.direction.x * cursorDistance,
+                targetRay.direction.y * cursorDistance,
+                targetRay.direction.z * cursorDistance,
+                ]);
+
+            scene.inputRenderer.addCursor(cursorPos);
+          }
+        }
+
+        // Handle controllers (non-hand input)
+        if (!inputSource.hand && inputSource.gripSpace) {
+          let gripPose = frame.getPose(inputSource.gripSpace, refSpace);
+          if (gripPose) {
+            scene.inputRenderer.addController(gripPose.transform.matrix, inputSource.handedness, inputSource.profiles[0]);
+          } else {
+            scene.inputRenderer.hideController(hand_type);
+          }
+        }
+
+        let offset = 0;
+        if (!inputSource.hand) {
+          // Hide hand boxes if no hand tracking
+          for (const box of boxes[hand_type]) {
+            scene.removeNode(box);
+          }
+          scene.removeNode(indexFingerBoxes[hand_type]);
+          continue;
+        } else {
+          // Process hand tracking data
+          let pose = frame.getPose(inputSource.targetRaySpace, refSpace);
+          if (pose === undefined) {
+            console.log("no pose");
+          }
+
+          if (!frame.fillJointRadii(inputSource.hand.values(), radii)) {
+            console.log("no fillJointRadii");
+            continue;
+          }
+          if (!frame.fillPoses(inputSource.hand.values(), refSpace, positions)) {
+            console.log("no fillPoses");
+            continue;
+          }
+          
+          // Update hand joint boxes
+          for (const box of boxes[hand_type]) {
+            scene.addNode(box);
+            let matrix = positions.slice(offset * 16, (offset + 1) * 16);
+            let jointRadius = radii[offset];
+            offset++;
+            mat4.getTranslation(box.translation, matrix);
+            mat4.getRotation(box.rotation, matrix);
+            box.scale = [jointRadius, jointRadius, jointRadius];
+          }
+          	
+          // Render a special box for each index finger on each hand	
+          const indexFingerBox = indexFingerBoxes[hand_type];
+          scene.addNode(indexFingerBox);	
+          let joint = inputSource.hand.get('index-finger-tip');	
+          let jointPose = frame.getJointPose(joint, xrImmersiveRefSpace || refSpace);	
+          if (jointPose) {	
+            let matrix = jointPose.transform.matrix;
+            mat4.getTranslation(indexFingerBox.translation, matrix);
+            mat4.getRotation(indexFingerBox.rotation, matrix);
+            indexFingerBox.scale = [0.02, 0.02, 0.02];	
+          }
+        }
+      }
+    }
+    
+    /**
+     * Update interactive elements that respond to hand proximity
+     * @param {number} time - Current timestamp
+     */
+    function UpdateInteractables(time) {
+      // Add scene objects if not present
+      if (!interactionBox) {	
+        /**
+         * Creates an interaction box with specified color
+         * @param {number} r - Red component
+         * @param {number} g - Green component  
+         * @param {number} b - Blue component
+         * @returns {Node} The interaction box node
+         */
+        function AddInteractionBox(r, g, b) {	
+          let box = new Node();	
+          box.addRenderPrimitive(createBoxPrimitive(r, g, b));	
+          box.translation = [0, 0, -0.65];	
+          box.scale = [0.25, 0.25, 0.25];	
+          return box;	
+        }	
+        interactionBox = AddInteractionBox(defaultBoxColor.r, defaultBoxColor.g, defaultBoxColor.b);	
+        leftInteractionBox = AddInteractionBox(leftBoxColor.r, leftBoxColor.g, leftBoxColor.b);	
+        rightInteractionBox = AddInteractionBox(rightBoxColor.r, rightBoxColor.g, rightBoxColor.b);	
+        scene.addNode(interactionBox);	
+        scene.addNode(leftInteractionBox);	
+        scene.addNode(rightInteractionBox);	
+      }
+      
+      /**
+       * Calculate 3D distance between two nodes
+       * @param {Node} nodeA - First node
+       * @param {Node} nodeB - Second node
+       * @returns {number} Distance between nodes
+       */
+      function Distance(nodeA, nodeB) {	
+        return Math.sqrt(	
+          Math.pow(nodeA.translation[0] - nodeB.translation[0], 2) +	
+          Math.pow(nodeA.translation[1] - nodeB.translation[1], 2) +	
+          Math.pow(nodeA.translation[2] - nodeB.translation[2], 2));	
+      }
+
+      // Perform distance check on interactable elements
+      const interactionDistance = interactionBox.scale[0];	
+      leftInteractionBox.visible = false;	
+      rightInteractionBox.visible = false;	
+      if (Distance(indexFingerBoxes.input_left, interactionBox) < interactionDistance) {
+        leftInteractionBox.visible = true;	
+      } else if (Distance(indexFingerBoxes.input_right, interactionBox) < interactionDistance) {
+        rightInteractionBox.visible = true;	
+      }	
+      interactionBox.visible = !(leftInteractionBox.visible || rightInteractionBox.visible);
+      
+      // Animate the interaction boxes
+      mat4.rotateX(interactionBox.matrix, interactionBox.matrix, time/1000);
+      mat4.rotateY(interactionBox.matrix, interactionBox.matrix, time/1500);
+      leftInteractionBox.matrix = interactionBox.matrix;
+      rightInteractionBox.matrix = interactionBox.matrix;
+    }
+
+    /**
+     * Main XR render loop - called every frame
+     * @param {number} t - Timestamp
+     * @param {XRFrame} frame - Current XR frame
+     */
+    function onXRFrame(t, frame) {
+      let session = frame.session;
+      let refSpace = session.isImmersive ?
+                       xrImmersiveRefSpace :
+                       inlineViewerHelper.referenceSpace;
+      let pose = frame.getViewerPose(refSpace);
+
+      scene.startFrame();
+      session.requestAnimationFrame(onXRFrame);
+
+      // Update hand tracking
+      updateInputSources(session, frame, refSpace);
+      updateTrackedSources(session, frame, refSpace);
+      UpdateInteractables(t);
+
+      scene.drawXRFrame(frame, pose);
+      scene.endFrame();
+    }
+
+    // Start the XR application.
+    initXR();
+  </script>
+</body>
+
+</html> 
